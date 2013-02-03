@@ -1,0 +1,520 @@
+#!/usr/bin/python
+#*-*coding:utf-8*-*
+#
+#IaaSapi
+#
+
+import json
+import httplib
+import time
+import urlparse
+import urllib
+
+'''变量含义：
+g_token_id，keystone提供的token id（令牌）
+g_admintoken，keystone提供的管理员token（一般在环境变量中预设，SERVICE_TOKEN）
+nova_url，nova服务的url（一般为：http://host_ip:8774/(v1.1)|(v2)/租户id）
+keystone_adminurl，keystone服务的管理员url（一般为：http://host_ip:35357/v2）
+keystoen_publicurl，keystone服务的公开url（一般为：http://host_ip:5000/v2）
+image_id，nova提供的image id（镜像）
+flavor_id，nova提供的flavor id（类型）
+server_id，nova提供的instance id（云主机）
+tenant_id，keystone提供的tenant id（租户）
+'''
+g_admin_token = '59106baea4e6180b40df'
+
+'''使用方法：
+先调用iaas_get_token()方法获取重要变量：
+token_id, nova_url, keystone_adminurl, keystone_publicurl = iaas_get_token(host_ip)
+nova_ip = nova_url[1]
+nova_path = nova_url[2]
+keystone_ip = keystone_adminurl[1]
+
+创建虚拟主机（server）时需要先获取镜像（images）与模板（flavors）id：
+image_id = json.loads(iaas_get_images(token_id, nova_ip, nova_path))['data']['images'][i]['id']
+flavor_id = json.loads(iaas_get_flavors(token_id, nova_ip, nova_path))['data']['flavors'][i]['id']
+'''
+
+#============================================
+#
+#使用HTTP方法调用IaaS的api，参考官方API文档
+#
+#============================================
+class GetHTTPConnect():
+    def __init__(self, url, method, path, params, headers):
+        self.url = url          
+        self.method = method    
+        self.path = path       
+        self.params = params 
+        self.headers = headers  
+        
+    def get_data(self):
+        try:
+            conn = httplib.HTTPConnection(self.url)
+            conn.request(self.method, self.path, self.params, self.headers)
+            response = conn.getresponse()
+            rsp = response.read()
+            conn.close()
+            try:
+                rrsp = json.loads(rsp)
+            except:
+                rrsp = rsp
+            finally:
+                rrsp = rsp
+        except:
+            '''出现socket.error: [Errno 113] No route to host是由于服务器上iptables缘故
+            '''
+            rsp = '[EEEOR] : unable to connect'       #连接异常
+        finally:
+            rrsp = rsp 
+        return rrsp
+
+'''假定_req格式如下：
+_req = {"flag": func_name,
+        "url": keystone_url,
+        "method": method_temp['post'],
+        "path": "/v2.0/tenants",
+        "params": json.dumps(_params),
+        "headers": headers_temp % _token_id}
+'''
+'''对iaas层的操作
+'''
+def iaas_func(_req):  
+    data = json.loads(_req)
+    conn = GetHTTPConnect(data['url'], data['method'], data['path'], data['params'], data['headers'])
+    iaas_rsp = conn.get_data()
+    rsp_to_box = {}
+    rsp_to_box['flag'] = data['flag']
+    try: 
+        rsp_to_box['data'] = json.loads(iaas_rsp)
+    except:
+        rsp_to_box['data'] = {"success": True}
+    rsp = json.dumps(rsp_to_box)
+    return rsp
+'''假定返回的_rsp格式如下：
+_rsp = {"flag": "func_name",
+        "data": {"...": "...",
+                 "...": "...",
+                 "...": "..."}}
+'''
+        
+#============================================
+#
+#对IaaS的接口进行封装
+#
+#============================================
+SERVICE_PATH_TEMP = {'getToken': "/v2.0/tokens",
+                     'createTenant': "/v2.0/tenants",
+                     'releaseTenant': "/v2.0/tenants/%s",
+                     'createServer': "/%s/servers",
+                     'releaseServer': "/%s/servers/%s",
+                     'checkServer': "/%s/servers/%s",
+                     'startServer': "/%s/servers/%s/action",
+                     'stopServer': "/%s/servers/%s/action",
+                     'getImages': "/%s/images/detail",
+                     'getFlavors': "/%s/flavors/detail"}
+
+'''首先获取token，创建租户(new tenant)需要admin的token，之后的服务需要为创建的租户(new tenant)获取token
+'''   
+def iaas_get_token(_host_ip):
+    params = '{"auth": {"tenantName": "admin", "passwordCredentials": {"username": "admin", "password": "verybadpass"}}}'
+    headers = {"Content-type": "application/json"}
+    req = {"flag": "getToken",
+           "url": _host_ip + ':35357',
+           "method": "POST",
+           "path": SERVICE_PATH_TEMP['getToken'],
+           "params": params,
+           "headers": headers}
+    rreq = json.dumps(req)
+    rsp = json.loads(iaas_func(rreq))
+    token_id = rsp['data']['access']['token']['id']
+    
+    for i in range(len(rsp['data']['access']['serviceCatalog'])):
+        if rsp['data']['access']['serviceCatalog'][i]['name'] == 'nova':
+            nova_url = urlparse.urlparse(rsp['data']['access']['serviceCatalog'][i]['endpoints'][0]['publicURL'])
+        elif rsp['data']['access']['serviceCatalog'][i]['name'] == 'keystone':
+            keystone_adminurl = urlparse.urlparse(rsp['data']['access']['serviceCatalog'][i]['endpoints'][0]['adminURL'])
+            keystone_publicurl = urlparse.urlparse(rsp['data']['access']['serviceCatalog'][i]['endpoints'][0]['publicURL'])
+        
+    '''token_id、_nova_url、_keystone_url返回信息大致如下：
+    _token_id = fac157e3a58247cba380f003b2438317
+    _nova_url = ParseResult(scheme=u'http', netloc=u':8774', path=u'/v2/a3e824093d694e72b478085d5e1707a0', params='', query='', fragment='')  
+    _keystone_url = ParseResult(scheme=u'http', netloc=u':5000', path=u'/v2.0', params='', query='', fragment='')
+    '''    
+    return token_id, nova_url, keystone_adminurl, keystone_publicurl
+'''假定_req格式如下：
+_req = {"flag": func_name,
+        "url": keystone_url,
+        "method": method_temp['post'],
+        "path": "/v2.0/tenants",
+        "params": json.dumps(_params),
+        "headers": headers_temp % _token_id}
+'''
+'''用于创建租户
+'''
+def iaas_create_tenant(_keystone_ip):
+    params = '{"tenant": {"enabled": true, "name": "%s", "description": null}}' % time.time()
+    headers = {"X-Auth-Token": g_admin_token, "Content-type": "application/json"}
+    req = {"flag": "createTenant",
+           "url": _keystone_ip,
+           "method": "POST",
+           "path": SERVICE_PATH_TEMP['createTenant'],
+           "params": params,
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    data['success'] = True 
+    data['message'] = ""
+    rreq = json.dumps(req)
+    rsp_from_iaas = json.loads(iaas_func(rreq))
+    tenant_id = rsp_from_iaas['data']['tenant']['id'] 
+    data['tenantId'] = tenant_id
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,  //true表示成功，false表示失败
+              "tenantId": "5cb0487e5fbe4b78afa1c842a8bfae7e",  //新创建的租户ID
+              "message": ""}}  //操作失败后，返回的错误信息
+    '''
+
+'''用于删除用户
+'''    
+def iaas_release_tenant(_keystone_ip, _tenant_id):
+    params = urllib.urlencode({})
+    headers = {"X-Auth-Token": g_admin_token, "Content-type": "application/json"}
+    req = {"flag": "releaseTenant",
+           "url": _keystone_ip,
+           "method": "DELETE",
+           "path": SERVICE_PATH_TEMP['releaseTenant'] % _tenant_id,
+           "params": params,
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    data['message'] = ""
+    rreq = json.dumps(req)
+    rsp_from_iaas = json.loads(iaas_func(rreq))
+    data['success'] = rsp_from_iaas['data']['success']
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "message":""}}
+    '''
+
+'''用于创建云主机
+'''
+def iaas_create_server(_token_id, _nova_ip, _nova_path, _image_id, _flavor_id):
+    '''格式如下:
+    "imageRef" : "http://novaURL/租户ID/images/imagesID"
+    "flavorRef" : "http://novaURL/v1.1/租户ID/flavors/flavorsID"
+    '''
+    imageRef = "http://%s/%s/images/%s" % (_nova_ip, _nova_path, _image_id)
+    flavorRef = "http://%s/%s/flavors/%s" % (_nova_ip, _nova_path, _flavor_id)
+    params = '{"server" : {"name": "%s", "imageRef" : "%s", "flavorRef" : "%s"}}' % ("iaaspserver", imageRef, flavorRef)
+    headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+
+    req = {"flag": "createServer",
+           "url": _nova_ip,
+           "method": "POST",
+           "path": SERVICE_PATH_TEMP['createServer'] % _nova_path,
+           "params": params,
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    data['message'] = ""
+    rreq = json.dumps(req)
+    rsp_from_iaas = json.loads(iaas_func(rreq))
+    server_id = rsp_from_iaas['data']['server']['id']
+    
+    '''每5秒查询一次虚拟主机的状态，如果为ACTIVE则跳出，总共查询36次，3分钟
+    '''
+    for i in range(3):
+        time.sleep(5)
+        status = iaas_check_server(_token_id, _nova_ip, _nova_path, server_id, 'check_status')
+        if status != 'ACTIVE':
+            if status == 'ERROR':
+                break         
+        else:
+            break           
+    if status != 'ACTIVE':
+        data['success'] = False
+        data['message'] = "failed to create server, the server_state is %s" % status
+    else:
+        ip = iaas_check_server(_token_id, _nova_ip, _nova_path, server_id, 'get_ip_info')
+        data['success'] = True
+        data['servers'] = []
+        data_server = {}
+        data_server['id'] = server_id
+        data_server['passwd'] = rsp_from_iaas['data']['server']['adminPass']
+        data_server['ip'] = ip
+        data_server['status'] = status
+        data['servers'].append(data_server)
+        
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "servers": [{"id": "60ca884b-4fb7-4c2d-823b-c0e3b7012561",
+                           "passwd": "odwmWQEQTZK7",
+                           "ip": [{"network": "public",
+                                   "version": "4",
+                                   "addr": "10.0.0.4"}],
+                           "status": "ACTIVE"}],
+              "message": ""}}
+    '''
+
+'''用于删除云主机
+'''
+def iaas_release_server(_token_id, _nova_ip, _nova_path, _server_id):
+    headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+    req = {"flag": "releaseServer",
+           "url": _nova_ip,
+           "method": "DELETE",
+           "path": SERVICE_PATH_TEMP['releaseServer'] % (_nova_path, _server_id),
+           "params": urllib.urlencode({}),
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    data['message'] = ""
+    exist = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'normal')
+    status = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'check_status')
+    if json.loads(exist)['data']['active'] == None:
+        data['success'] = False
+        data['message'] = "server %s is not exist" % _server_id
+    elif status in ['PAUSE', 'UNPAUSE', 'BUILD']:
+        data['message'] = "Cannot 'delete' while instance is in vm_state %s" % status
+        data['success'] = False
+    else:
+        rreq = json.dumps(req)
+        rsp_from_iaas = json.loads(iaas_func(rreq))
+        data['success'] = rsp_from_iaas['data']['success']
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "message":""}}
+    '''
+
+'''用于检查云主机运行状态,type为normal返回消息给paas，type为其他则用于自我查询
+'''    
+def iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, _type='normal'):
+    headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+    req = {"flag": "checkServer",
+           "url": _nova_ip,
+           "method": "GET",
+           "path": SERVICE_PATH_TEMP['checkServer'] % (_nova_path, _server_id),
+           "params": urllib.urlencode({}),
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    ip_data = []
+    data['message'] = ""
+    rreq = json.dumps(req)
+    rsp_from_iaas = json.loads(iaas_func(rreq))
+    '''如果主机已被删除，返回如下信息：
+    {u'flag': u'checkServer', u'data': {u'itemNotFound': {u'message': u'The resource could not be found.', u'code': 404}}}
+    '''
+    if rsp_from_iaas['data'].keys()[0] == 'itemNotFound':
+        data['success'] = False
+        data['active'] = None
+        data['message'] = rsp_from_iaas['data']['itemNotFound']['message']
+    elif rsp_from_iaas['data'].keys()[0] == 'server':
+        if _type == 'check_status':
+            return rsp_from_iaas['data']['server']['status']
+        elif _type == 'get_ip_info':
+            ip_name = rsp_from_iaas['data']['server']['addresses'].keys()[0]
+            ip_data.append({"network": ip_name,
+                            "version": rsp_from_iaas['data']['server']['addresses'][ip_name][0]['version'],
+                            "addr": rsp_from_iaas['data']['server']['addresses'][ip_name][0]['addr']})
+            return ip_data
+        elif _type == 'normal': 
+            data['success'] = True
+            if rsp_from_iaas['data']['server']['status'] != 'ACTIVE':
+                data['active'] = "false"
+            else:
+                data['active'] = "true"        
+             
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)            
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "active": true,
+              "message": ""}}
+    '''
+
+'''用于启动云主机
+'''    
+def iaas_start_server(_token_id, _nova_ip, _nova_path, _server_id):
+    rsp = {}
+    data = {}
+    exist = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'normal')
+    status = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'check_status')
+    if json.loads(exist)['data']['active'] == None:
+        data['success'] = False
+        data['message'] = "server %s is not exist" % _server_id
+    elif status == 'PAUSED':
+        params = '{"unpause" :{}}'
+        headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+        req = {"flag": "startServer",
+               "url": _nova_ip,
+               "method": "POST",
+               "path": SERVICE_PATH_TEMP['startServer'] % (_nova_path, _server_id),
+               "params": params,
+               "headers": headers}
+        
+        rreq = json.dumps(req)
+        rsp_from_iaas = json.loads(iaas_func(rreq))        
+        for i in range(3):
+            time.sleep(5)
+            status = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'check_status')
+            if status != 'ACTIVE':
+                data['success'] = False
+                data['message'] = "can't start server"
+            else:
+                data['success'] = rsp_from_iaas['data']['success']
+                data['message'] = ""
+                break
+    else:
+        data['success'] = False
+#        data['message'] = "can't start server while vm_state is ACTIVE"
+        data['message'] = "cant't start server while vm state is %s" % status
+    
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "message": ""}}
+    '''        
+        
+
+
+'''用于暂停云主机
+'''    
+def iaas_stop_server(_token_id, _nova_ip, _nova_path, _server_id):
+    rsp = {}
+    data = {}
+    exist = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'normal')
+    status = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'check_status')
+    if json.loads(exist)['data']['active'] == None:
+        data['success'] = False
+        data['message'] = "server %s is not exist" % _server_id
+    elif status == 'ACTIVE':
+        params = '{"pause" :{}}'
+        headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+        req = {"flag": "stopServer",
+               "url": _nova_ip,
+               "method": "POST",
+               "path": SERVICE_PATH_TEMP['stopServer'] % (_nova_path, _server_id),
+               "params": params,
+               "headers": headers}
+        
+        rreq = json.dumps(req)
+        rsp_from_iaas = json.loads(iaas_func(rreq))        
+        for i in range(3):
+            time.sleep(5)
+            status = iaas_check_server(_token_id, _nova_ip, _nova_path, _server_id, 'check_status')
+            if status != 'PAUSED':
+                data['success'] = False
+                data['message'] = "can't stop server"
+            else:
+                data['success'] = rsp_from_iaas['data']['success']
+                data['message'] = ""
+                break
+    else:
+        data['success'] = False
+        data['message'] = "can't stop server while vm_state is not ACTIVE"
+    
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "message": ""}}
+    '''
+
+'''用于获取镜像列表
+'''
+def iaas_get_images(_token_id, _nova_ip, _nova_path):
+    headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+    req = {"flag": "getImages",
+           "url": _nova_ip,
+           "method": "GET",
+           "path": SERVICE_PATH_TEMP['getImages'] % _nova_path,
+           "params": urllib.urlencode({}),
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    data['success'] = True
+    data['message'] = ""
+    data['images'] = []
+    rreq = json.dumps(req)
+    rsp_from_iaas = json.loads(iaas_func(rreq))
+    for i in range(len(rsp_from_iaas['data']['images'])):
+        data['images'].append({"id": rsp_from_iaas['data']['images'][i]['id'], 
+                                "name": rsp_from_iaas['data']['images'][i]['name']})
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "images": [{"id": "f49ef12f-1bdb-43c6-a01d-ea31a42e68ce",
+                          "name": "ubuntu"},
+                         {"id": "0eb1f2ae-16d4-44d2-aa3d-f39d6a901ba2",
+                          "name": "cirros-0.3.0-x86_64"}],
+              "message": ""}}
+    '''
+
+'''用于获取模板列表
+'''
+def iaas_get_flavors(_token_id, _nova_ip, _nova_path):
+    headers = {"X-Auth-Token": _token_id, "Content-type": "application/json"}
+    req = {"flag": "getFlavors",
+           "url": _nova_ip,
+           "method": "GET",
+           "path": SERVICE_PATH_TEMP['getFlavors'] % _nova_path,
+           "params": urllib.urlencode({}),
+           "headers": headers}
+    
+    rsp = {}
+    data = {}
+    data['success'] = True
+    data['message'] = ""
+    data['flavors'] = []
+    rreq = json.dumps(req)
+    rsp_from_iaas = json.loads(iaas_func(rreq))
+    for i in range(len(rsp_from_iaas['data']['flavors'])):
+        data['flavors'].append({"id": rsp_from_iaas['data']['flavors'][i]['id'], 
+                                "name": rsp_from_iaas['data']['flavors'][i]['name'],
+                                "vcpus": rsp_from_iaas['data']['flavors'][i]['vcpus'],
+                                "memory": rsp_from_iaas['data']['flavors'][i]['ram'],
+                                "disk": rsp_from_iaas['data']['flavors'][i]['disk']})
+    rsp['data'] = data
+    rsp_to_paas = json.dumps(rsp)
+    return rsp_to_paas
+    '''返回格式如下：
+    {"data": {"success": true,
+              "flavors": [{"id": "1",
+                           "name": "m1.tiny",
+                           "vcpus": 1,
+                           "memory": 512,
+                           "disk": 0},
+                          {"id": "2",
+                           "name": "m1.small",
+                           "vcpus": 1,
+                           "memory": 2048,
+                           "disk": 20}],
+              "message": ""}}
+    '''
+
